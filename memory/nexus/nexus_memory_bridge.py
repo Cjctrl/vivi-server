@@ -426,11 +426,14 @@ class NexusAPIError(RuntimeError):
 # ===========================================================================
 
 _client: Optional[AgentMemoryClient] = None
+_client_lock = threading.Lock()
 
 
 def get_memory_client(base_url: str = NEXUS_BASE_URL) -> AgentMemoryClient:
     """Return the shared singleton AgentMemoryClient."""
     global _client
     if _client is None:
-        _client = AgentMemoryClient(base_url=base_url)
+        with _client_lock:
+            if _client is None:
+                _client = AgentMemoryClient(base_url=base_url)
     return _client

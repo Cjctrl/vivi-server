@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +32,26 @@ from config.settings import CONDUCTOR_MODEL, MEMORY_DB_PATH
 from core.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Write text atomically: write to a sibling temp file, then os.replace into place.
+
+    Guarantees: either the old file persists unchanged, or the new content is fully
+    written and visible. No half-written state is observable to readers.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 # At most one LLM-backed update this often — guards against thrashing the model
 # when many tasks complete in quick succession.
@@ -118,7 +140,7 @@ class UserIdentityModel:
             "last_updated": self.last_updated.isoformat() if self.last_updated else None,
         }
         try:
-            self._path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            _atomic_write_text(self._path, json.dumps(payload, indent=2))
         except Exception as exc:
             logger.warning("[identity] save failed: %s", exc)
 

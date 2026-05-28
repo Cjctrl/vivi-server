@@ -15,7 +15,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from qdrant_client.http.models import PointStruct
+from qdrant_client.http.models import PointIdsList, PointStruct
 
 from config.settings import (
     PHOTO_MEMORY_CACHE_SIZE,
@@ -252,7 +252,7 @@ class PhotoMemoryAgent(BaseAgent):
         try:
             self._store.client.delete(
                 collection_name=_COLLECTION,
-                points_selector=[memory_id],
+                points_selector=PointIdsList(points=[memory_id]),
             )
         except Exception as exc:
             return {"status": "error", "error": f"Delete failed: {exc}", "confidence": 0.0}

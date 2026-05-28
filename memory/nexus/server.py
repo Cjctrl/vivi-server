@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,26 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 from aiohttp import web
+
+
+def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Write text atomically: write to a sibling temp file, then os.replace into place.
+
+    Guarantees: either the old file persists unchanged, or the new content is fully
+    written and visible. No half-written state is observable to readers.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 from config.settings import (
     MEMORY_DB_PATH,
@@ -53,6 +74,18 @@ logger = logging.getLogger(__name__)
 
 NEXUS_COLLECTION = "nexus_kb"
 _UUID_NS = uuid.NAMESPACE_DNS
+
+
+def _spawn_tracked(app: web.Application, coro) -> asyncio.Task:
+    """Schedule a fire-and-forget coroutine with a strong reference held in app['_bg_tasks'].
+
+    Python 3.11+ may GC tasks that have no strong reference; this guarantees the
+    embedding task survives until completion regardless.
+    """
+    task = asyncio.create_task(coro)
+    app["_bg_tasks"].add(task)
+    task.add_done_callback(app["_bg_tasks"].discard)
+    return task
 
 # ---------------------------------------------------------------------------
 # Agent color palette — one neon color per registered agent
@@ -93,9 +126,7 @@ def _load_interactions() -> None:
 
 def _save_interactions() -> None:
     try:
-        _INTERACTIONS_PATH.write_text(
-            json.dumps(_interactions, indent=2), encoding="utf-8"
-        )
+        _atomic_write_text(_INTERACTIONS_PATH, json.dumps(_interactions, indent=2))
     except Exception as exc:
         logger.warning("[nexus/interactions] save failed: %s", exc)
 
@@ -159,8 +190,7 @@ def _build_frontmatter(fm: dict) -> str:
 
 
 def _write_node_file(path: Path, fm: dict, body: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_build_frontmatter(fm) + "\n" + body.lstrip("\n"), encoding="utf-8")
+    _atomic_write_text(path, _build_frontmatter(fm) + "\n" + body.lstrip("\n"))
 
 
 def _read_node_file(path: Path, kb_root: Path) -> Optional[dict]:
@@ -373,7 +403,7 @@ async def handle_search(request: web.Request) -> web.Response:
     store: VectorStore = request.app["store"]
     embedder = request.app["embedder"]
     kb_root: Path = request.app["kb_root"]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     seen_titles: set = set()
     results: List[dict] = []
@@ -462,7 +492,7 @@ async def handle_get_by_tag(request: web.Request) -> web.Response:
     """GET /api/tags/{tag}"""
     tag = request.match_info["tag"]
     kb_root: Path = request.app["kb_root"]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     nodes = await loop.run_in_executor(None, _find_nodes_by_tag, tag, kb_root)
     agent = request.headers.get("X-Agent-Name", "unknown")
     for node in nodes:
@@ -510,8 +540,8 @@ async def handle_create_node(request: web.Request) -> web.Response:
     # Re-embed asynchronously
     store: VectorStore = request.app["store"]
     embedder = request.app["embedder"]
-    loop = asyncio.get_event_loop()
-    asyncio.ensure_future(_embed_node(title, body, store, embedder, loop))
+    loop = asyncio.get_running_loop()
+    _spawn_tracked(request.app, _embed_node(title, body, store, embedder, loop))
 
     _record(title, request.headers.get("X-Agent-Name", "unknown"), "write")
     # Keep node_meta cache in sync
@@ -554,8 +584,8 @@ async def handle_append(request: web.Request) -> web.Response:
     # Re-embed new content
     store: VectorStore = request.app["store"]
     embedder = request.app["embedder"]
-    loop = asyncio.get_event_loop()
-    asyncio.ensure_future(_embed_node(title, body, store, embedder, loop))
+    loop = asyncio.get_running_loop()
+    _spawn_tracked(request.app, _embed_node(title, body, store, embedder, loop))
 
     _record(title, request.headers.get("X-Agent-Name", "unknown"), "write")
 
@@ -673,7 +703,7 @@ async def handle_reembed(request: web.Request) -> web.Response:
 
     store: VectorStore = request.app["store"]
     embedder = request.app["embedder"]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # Remove stale vectors, re-embed fresh content
     await _delete_node_vectors(title, store, loop)
@@ -701,7 +731,7 @@ async def handle_delete_node(request: web.Request) -> web.Response:
     node_path.unlink()
 
     store: VectorStore = request.app["store"]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await _delete_node_vectors(title, store, loop)
 
     _record(title, request.headers.get("X-Agent-Name", "unknown"), "write")
@@ -787,7 +817,7 @@ async def on_startup(app: web.Application) -> None:
 
     # Build in-memory knowledge graph
     graph: KnowledgeGraph = app["graph"]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, graph.build, kb_root)
 
     # Build lightweight node metadata cache (type + tags for every .md file)
@@ -806,6 +836,14 @@ async def on_shutdown(app: web.Application) -> None:
     logger.info("[nexus/server] shutting down")
 
 
+async def _drain_bg_tasks(app: web.Application) -> None:
+    tasks = list(app.get("_bg_tasks") or ())
+    for t in tasks:
+        t.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def create_app(kb_root: Optional[Path] = None) -> web.Application:
     if kb_root is None:
         kb_root = Path(NEXUS_KB_PATH)
@@ -819,9 +857,11 @@ def create_app(kb_root: Optional[Path] = None) -> web.Application:
     app["store"] = store
     app["embedder"] = embedder
     app["graph"] = graph
+    app["_bg_tasks"] = set()
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
+    app.on_shutdown.append(_drain_bg_tasks)
 
     # Routes
     app.router.add_get("/", handle_root_redirect)

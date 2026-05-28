@@ -9,6 +9,7 @@ No separate graph database is required; the files *are* the graph.
 from __future__ import annotations
 
 import logging
+import threading
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -154,10 +155,13 @@ class KnowledgeGraph:
 # ---------------------------------------------------------------------------
 
 _graph: Optional[KnowledgeGraph] = None
+_graph_lock = threading.Lock()
 
 
 def get_graph() -> KnowledgeGraph:
     global _graph
     if _graph is None:
-        _graph = KnowledgeGraph()
+        with _graph_lock:
+            if _graph is None:
+                _graph = KnowledgeGraph()
     return _graph

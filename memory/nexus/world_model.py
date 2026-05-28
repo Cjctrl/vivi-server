@@ -210,9 +210,8 @@ class WorldModel:
     def _search(self, vector: List[float], limit: int) -> List[Any]:
         """Query the collection, tolerating the qdrant-client vector-kwarg rename.
 
-        Newer qdrant-client uses ``query=``; older uses ``query_vector=``. The
-        shared VectorStore.search tries them in the opposite order, so we query
-        the client directly here to stay robust across versions.
+        Newer qdrant-client (≥1.7) uses ``query=``; older uses ``query_vector=``.
+        Try the new form first and fall back if the client rejects it.
         """
         try:
             return self._store.client.query_points(
@@ -221,7 +220,8 @@ class WorldModel:
                 limit=limit,
                 with_payload=True,
             ).points
-        except TypeError:
+        except (TypeError, ValueError) as exc:
+            logger.debug("qdrant query= form rejected, falling back to query_vector=: %s", exc)
             return self._store.client.query_points(
                 collection_name=WORLD_COLLECTION,
                 query_vector=vector,
