@@ -1,0 +1,18 @@
+.env
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+.claude/
+vivi_api/node_modules/
+
+# Runtime data / logs / local databases (not source)
+chat_log.jsonl
+logs/
+db/*.db
+memory/*_db/
+
+# ZIM knowledge base local data (memory/zim_kb_data/): contains 24+ GB of
+# .zim archives, the markdown cache, embeddings, and the metadata sqlite.
+# All of it is regenerable from VIVI_MEMDSK_PATH; nothing here belongs in git.
+memory/zim_kb_data/
