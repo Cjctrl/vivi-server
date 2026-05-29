@@ -31,7 +31,6 @@ import hmac
 import json
 import logging
 import os
-import re
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -121,6 +120,7 @@ def _load_interactions() -> None:
         try:
             _interactions = json.loads(_INTERACTIONS_PATH.read_text("utf-8"))
         except Exception:
+            logger.warning("interactions_load_failed", exc_info=True)
             _interactions = {}
 
 

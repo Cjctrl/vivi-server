@@ -310,6 +310,7 @@ class PhotoMemoryAgent(BaseAgent):
             if pts:
                 return {"id": str(pts[0].id), **( pts[0].payload or {})}
         except Exception:
+            logger.debug("photo_memory_recall_op_failed", exc_info=True)
             pass
         return None
 
@@ -335,6 +336,7 @@ class PhotoMemoryAgent(BaseAgent):
                 points=[point_id],
             )
         except Exception:
+            logger.debug("photo_memory_recall_op_failed", exc_info=True)
             pass
 
     # ------------------------------------------------------------------

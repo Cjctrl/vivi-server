@@ -103,6 +103,7 @@ class KeywordSearchAgent(BaseAgent):
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except Exception:
+                logger.debug("keyword_search_skip_file", exc_info=True)
                 continue
 
             if _is_binary(text):

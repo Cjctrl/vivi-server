@@ -87,31 +87,40 @@ class VectorStore:
     """Singleton wrapper for a local Qdrant client."""
 
     _instances: Dict[tuple, "VectorStore"] = {}
+    _instances_lock = threading.Lock()
 
     def __new__(cls, db_path: Optional[Path] = None) -> "VectorStore":
         key = (cls, db_path)
         if key not in cls._instances:
-            instance = super().__new__(cls)
-            instance._initialized = False
-            cls._instances[key] = instance
+            with cls._instances_lock:
+                if key not in cls._instances:
+                    instance = super().__new__(cls)
+                    instance._initialized = False
+                    cls._instances[key] = instance
         return cls._instances[key]
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
         if getattr(self, "_initialized", False):
             return
-        qdrant_url = os.getenv("QDRANT_URL")
-        if qdrant_url:
-            # Local Qdrant server — set QDRANT_URL=http://localhost:6333
-            # Start with: docker run -p 6333:6333 -v ./memory/qdrant:/qdrant/storage qdrant/qdrant
-            self.client = QdrantClient(url=qdrant_url)
-            logger.info("VectorStore connected to Qdrant server at %s", qdrant_url)
-        else:
-            if db_path is None:
-                db_path = Path(MEMORY_DB_PATH)
-            db_path.mkdir(parents=True, exist_ok=True)
-            self.client = QdrantClient(path=str(db_path))
-            logger.info("VectorStore initialized at %s", db_path)
-        self._initialized = True
+        try:
+            qdrant_url = os.getenv("QDRANT_URL")
+            if qdrant_url:
+                # Local Qdrant server — set QDRANT_URL=http://localhost:6333
+                # Start with: docker run -p 6333:6333 -v ./memory/qdrant:/qdrant/storage qdrant/qdrant
+                self.client = QdrantClient(url=qdrant_url)
+                logger.info("VectorStore connected to Qdrant server at %s", qdrant_url)
+            else:
+                if db_path is None:
+                    db_path = Path(MEMORY_DB_PATH)
+                db_path.mkdir(parents=True, exist_ok=True)
+                self.client = QdrantClient(path=str(db_path))
+                logger.info("VectorStore initialized at %s", db_path)
+            self._initialized = True
+        except Exception:
+            # On init failure, evict from singleton cache so the next caller retries.
+            key = (type(self), db_path)
+            type(self)._instances.pop(key, None)
+            raise
 
     def ensure_collection(self, name: str, vector_size: int = VECTOR_DIMENSION) -> None:
         """Create the collection if it does not already exist."""
@@ -137,17 +146,12 @@ class VectorStore:
         limit: int,
         score_threshold: float = 0.0,
     ) -> List[ScoredPoint]:
-        """Search the vector store and return scored points."""
+        """Search the vector store and return scored points.
+
+        Tries the newer `query=` parameter (qdrant-client ≥1.7) first; falls back
+        to the older `query_vector=` parameter if the new client rejects it.
+        """
         try:
-            results = self.client.query_points(
-                collection_name=collection,
-                query_vector=query_vector,
-                limit=limit,
-                with_payload=True,
-                score_threshold=score_threshold,
-            )
-            return results.points
-        except TypeError:
             results = self.client.query_points(
                 collection_name=collection,
                 query=query_vector,
@@ -156,6 +160,20 @@ class VectorStore:
                 score_threshold=score_threshold,
             )
             return results.points
+        except (TypeError, ValueError) as exc:
+            logger.debug("qdrant query= form rejected, falling back to query_vector=: %s", exc)
+            try:
+                results = self.client.query_points(
+                    collection_name=collection,
+                    query_vector=query_vector,
+                    limit=limit,
+                    with_payload=True,
+                    score_threshold=score_threshold,
+                )
+                return results.points
+            except Exception as exc2:
+                logger.error("Qdrant search failed for collection %s: %s", collection, exc2)
+                raise
         except Exception as exc:
             logger.error("Qdrant search failed for collection %s: %s", collection, exc)
             raise
@@ -201,13 +219,16 @@ class VectorStore:
 
 
 _embedding_service_instance: Optional[EmbeddingService] = None
+_embedding_service_instance_lock = threading.Lock()
 
 
 def get_embedding_service() -> EmbeddingService:
     """Return the shared singleton EmbeddingService instance."""
     global _embedding_service_instance
     if _embedding_service_instance is None:
-        _embedding_service_instance = EmbeddingService()
+        with _embedding_service_instance_lock:
+            if _embedding_service_instance is None:
+                _embedding_service_instance = EmbeddingService()
     return _embedding_service_instance
 
 

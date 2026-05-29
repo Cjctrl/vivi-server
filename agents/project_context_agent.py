@@ -124,6 +124,7 @@ class ProjectContextAgent(BaseAgent):
                     "preview": path.read_text(encoding="utf-8", errors="ignore")[:200],
                 })
             except Exception:
+                logger.debug("project_scan_op_failed", exc_info=True)
                 continue
 
         files.sort(key=lambda x: x["mtime"], reverse=True)
@@ -169,6 +170,7 @@ class ProjectContextAgent(BaseAgent):
                     "has_tasks": has_tasks,
                 })
             except Exception:
+                logger.debug("project_scan_op_failed", exc_info=True)
                 continue
 
         projects.sort(key=lambda x: x["last_modified"], reverse=True)
@@ -214,6 +216,7 @@ class ProjectContextAgent(BaseAgent):
                     "extension": path.suffix,
                 })
             except Exception:
+                logger.debug("project_scan_op_failed", exc_info=True)
                 continue
 
         code_files.sort(key=lambda x: x["mtime"], reverse=True)
@@ -313,6 +316,7 @@ def _read_git_repo(repo_path: Path) -> Dict[str, Any]:
             )
             return r.stdout.strip()
         except Exception:
+            logger.debug("project_scan_op_failed", exc_info=True)
             return ""
 
     branch = _run(["git", "branch", "--show-current"])
@@ -327,6 +331,7 @@ def _read_git_repo(repo_path: Path) -> Dict[str, Any]:
             try:
                 readme_preview = readme.read_text(encoding="utf-8", errors="ignore")[:500]
             except Exception:
+                logger.debug("project_scan_op_failed", exc_info=True)
                 pass
             break
 
