@@ -1,7 +1,9 @@
 """
 config/settings.py
-V.I.V.I AI Conductor — Configuration
-Hardware: Ryzen 9800X3D · RTX 5080 16GB VRAM · 64GB System RAM
+V.I.V.I AI Conductor — Configuration  (vivi-server: memory/knowledge backend)
+Hardware: RTX 3060 12GB VRAM · 32GB DDR4 · headless Ubuntu (whole GPU free).
+This host only runs CONDUCTOR_MODEL (summaries) + EMBED_MODEL (vector search);
+the coding/reasoning/vision tiers below are inherited from vivi-brain but unused.
 NEXUS is the sole knowledge/memory layer (port 7200, nexus/knowledge_base/).
 """
 
@@ -11,6 +13,20 @@ from pathlib import Path
 
 # Repository root (config/ is one level below it). Used to anchor write roots.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Load .env so any entrypoint (standalone gateway, tests, agents) sees the
+# same config. python-dotenv isn't installed, so parse it the same way the
+# main launcher does. setdefault means real env vars and the launcher win.
+# Without this, the _required() secret checks below fire at import with
+# nothing to read and the server cannot launch standalone.
+_ENV_FILE = PROJECT_ROOT / ".env"
+if _ENV_FILE.exists():
+    for _line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#") or "=" not in _line:
+            continue
+        _k, _, _v = _line.partition("=")
+        os.environ.setdefault(_k.strip(), _v.strip())
 
 def _env(key: str, default: str) -> str:
     return os.getenv(key, default)
@@ -32,50 +48,64 @@ def _bool(key: str, default: bool) -> bool:
 
 
 # =============================================================================
-# MODELS
-# Tier 1 — Persistent residents (always loaded, fit comfortably together in
-#           16GB VRAM at Q4: ~2GB + ~4GB + ~0.5GB ≈ 6.5GB combined)
+# MODELS  (vivi-server — RTX 3060 12GB, headless)
+# Only CONDUCTOR_MODEL and EMBED_MODEL are actually invoked on this host:
+#   - CONDUCTOR_MODEL : recap_agent + personal_facts_agent summarization
+#   - EMBED_MODEL     : every Qdrant vector op (memory, vault, keyword, photo)
+# There is NO VRAM scheduler here (agents call Ollama directly), so pin both
+# resident via Ollama env: OLLAMA_KEEP_ALIVE=-1, OLLAMA_MAX_LOADED_MODELS=2,
+# OLLAMA_NUM_PARALLEL=1 (see the systemd override notes).
 # =============================================================================
 
-CONDUCTOR_MODEL     = _env("CONDUCTOR_MODEL",     "qwen3:8b-q4")
-WEB_SEARCH_MODEL    = _env("WEB_SEARCH_MODEL",    "llama3.1:8b-q4")
+# --- Live models -------------------------------------------------------------
+# Headless 12GB is fully free, so we run the larger 14B summarizer for best
+# extraction quality: qwen3:14b-q4 (~9GB) + nomic-embed (~0.6GB) + 8k q8 KV
+# (~0.7GB) ~= 11.1GB, fits with ~0.9GB margin. To trade depth for headroom and
+# faster summaries instead, set CONDUCTOR_MODEL=qwen3:8b-q4 (frees ~4GB).
+# NOTE: "-q4" is your local tag convention — create qwen3:14b-q4 the same way
+# you made qwen3:8b-q4 (e.g. `ollama pull qwen3:14b` then copy/tag), or point
+# CONDUCTOR_MODEL at whatever 14B tag you have pulled.
+CONDUCTOR_MODEL     = _env("CONDUCTOR_MODEL",     "qwen3:14b-q4")
 EMBED_MODEL         = _env("EMBED_MODEL",         "nomic-embed-text")   # also KB_SEARCH_MODEL
 KB_SEARCH_MODEL     = EMBED_MODEL                                        # alias — single source of truth
-VAULT_SEARCH_MODEL  = _env("VAULT_SEARCH_MODEL",  EMBED_MODEL)           # embeddings-backed vault search (~0.5GB, Tier 1)
+VAULT_SEARCH_MODEL  = _env("VAULT_SEARCH_MODEL",  EMBED_MODEL)           # embeddings-backed vault search
 
-# Tier 2 — Hot-swappable specialists (loaded on demand, evicted when idle)
-# ~7–8GB each at Q4 — swap in/out without exceeding MAX_VRAM_USAGE_GB
-CODING_MODEL        = _env("CODING_MODEL",        "qwen2.5-coder:14b-q4")
-REASONING_MODEL     = _env("REASONING_MODEL",     "deepseek-r1:14b-q4")
-MATH_MODEL          = _env("MATH_MODEL",          "phi4:14b-q4")
-REFLECTION_MODEL    = _env("REFLECTION_MODEL",    "deepseek-r1:14b-q4")
+# --- Inherited but UNUSED on this host ---------------------------------------
+# No vivi-server agent references these (they were copy-pasted from vivi-brain).
+# Defaults are capped to models that fit 12GB so an accidental import-and-call
+# degrades gracefully instead of dragging a 32B onto the card and spilling to
+# CPU/RAM. Tune the real specialist roster on the brain, not here.
+WEB_SEARCH_MODEL    = _env("WEB_SEARCH_MODEL",    "llama3.1:8b-q4")
+CODING_MODEL        = _env("CODING_MODEL",        "qwen2.5-coder:7b-q4")
+REASONING_MODEL     = _env("REASONING_MODEL",     CONDUCTOR_MODEL)
+MATH_MODEL          = _env("MATH_MODEL",          CONDUCTOR_MODEL)
+REFLECTION_MODEL    = _env("REFLECTION_MODEL",    CONDUCTOR_MODEL)
 VISUAL_CONTEXT_MODEL= _env("VISUAL_CONTEXT_MODEL","qwen2.5vl:7b-q4")
 GRAPH_TRAVERSAL_MODEL=_env("GRAPH_TRAVERSAL_MODEL","qwen2.5-coder:7b-q4")
-TOOL_DISCOVERY_MODEL= _env("TOOL_DISCOVERY_MODEL","qwen2.5-coder:7b-q4")  # 7b-q4 (~4GB) — reuses the coder family for tool/intent matching
-
-# Tier 3 — Cold storage (explicitly requested only; evict all tier-2 first)
-# ~13–14GB at Q3 — barely fits solo; never load alongside another large model
-HEAVY_CODING_MODEL  = _env("HEAVY_CODING_MODEL",  "qwen2.5-coder:32b-q3")
-HEAVY_REASONING_MODEL=_env("HEAVY_REASONING_MODEL","deepseek-r1:32b-q3")
+TOOL_DISCOVERY_MODEL= _env("TOOL_DISCOVERY_MODEL","qwen2.5-coder:7b-q4")
+HEAVY_CODING_MODEL  = _env("HEAVY_CODING_MODEL",  "qwen2.5-coder:14b-q4")  # was 32b-q3 (~14.5GB, won't fit 12GB)
+HEAVY_REASONING_MODEL=_env("HEAVY_REASONING_MODEL", CONDUCTOR_MODEL)        # was deepseek-r1:32b-q3
 
 
 # =============================================================================
-# VRAM MANAGEMENT
-# 5080 has 16GB. Keep 2GB headroom for driver + KV cache spikes.
-# 14GB usable across all resident + active models.
+# VRAM MANAGEMENT  (RTX 3060 12GB)
+# vivi-server has NO VRAM scheduler — it calls Ollama directly, so these values
+# are advisory only. Real residency is governed by Ollama env (OLLAMA_KEEP_ALIVE,
+# OLLAMA_MAX_LOADED_MODELS, OLLAMA_NUM_PARALLEL). Sized for a 12GB card that is
+# fully free under headless Ubuntu (no display compositor).
 # =============================================================================
 
-MAX_VRAM_USAGE_GB       = _float("MAX_VRAM_USAGE_GB",   14.0)
-VRAM_HEADROOM_GB        = _float("VRAM_HEADROOM_GB",     2.0)
-MODEL_LOAD_TIMEOUT      = _int(  "MODEL_LOAD_TIMEOUT",   30)
+MAX_VRAM_USAGE_GB       = _float("MAX_VRAM_USAGE_GB",   11.0)
+VRAM_HEADROOM_GB        = _float("VRAM_HEADROOM_GB",     1.0)
+MODEL_LOAD_TIMEOUT      = _int(  "MODEL_LOAD_TIMEOUT",   45)   # 3060 cold-loads slower than a 5080
 MODEL_UNLOAD_TIMEOUT    = _int(  "MODEL_UNLOAD_TIMEOUT", 10)
 
-# Context windows — tuned for 16GB; 14B models can safely run 8k context
-# without blowing VRAM. 32B models need shorter context to fit.
+# Context windows — 8k is safe alongside a resident 14B + embeddings at q8 KV.
+# Raise CTX_14B toward 12288 if you keep CONDUCTOR_MODEL at 8B (more spare VRAM).
 CONTEXT_LIMITS: dict[str, int] = {
     "7b_models":  _int("CTX_7B",  8192),
     "14b_models": _int("CTX_14B", 8192),
-    "32b_models": _int("CTX_32B", 4096),
+    "32b_models": _int("CTX_32B", 2048),
 }
 
 
@@ -226,6 +256,7 @@ OVERLAY_CAPTURE_INTERVAL     = _float("OVERLAY_CAPTURE_INTERVAL",    5.0)
 OVERLAY_WS_METRICS_INTERVAL  = _float("OVERLAY_WS_METRICS_INTERVAL", 5.0)
 OVERLAY_WHISPER_MODEL        = _env(  "OVERLAY_WHISPER_MODEL",      "base.en")
 NEXUS_PORT                   = _int(  "NEXUS_PORT",                  7200)
+NEXUS_HOST                   = _env(  "NEXUS_HOST",                 "127.0.0.1")
 
 # WS_SECRET — shared secret for the overlay WebSocket HMAC challenge-response
 # auth gate (see overlay/overlay_server.py ws_handler). REQUIRED, no default:
@@ -241,10 +272,18 @@ WS_SECRET = _required("WS_SECRET")
 # default: the server binds to localhost only, but any local process can reach
 # it, so writes/deletes must prove they hold this secret via either an
 # `Authorization: Bearer <token>` or `X-Nexus-Token: <token>` header. GET
-# routes stay open (read-only). Mirrors the WS_SECRET handshake pattern.
+# routes stay open (read-only) unless NEXUS_REQUIRE_READ_AUTH is set (below).
+# Mirrors the WS_SECRET handshake pattern.
 # Generate with:
 #   python -c "import secrets; print(secrets.token_hex(32))"
 NEXUS_SECRET = _required("NEXUS_SECRET")
+
+# NEXUS_REQUIRE_READ_AUTH — when true, the NEXUS server also requires the shared
+# secret on data reads (GET /api/*), not just mutations; /health and the static
+# UI shell stay open. Default false preserves the localhost-open read model. The
+# agent bridge already sends the token on every request, so enabling this only
+# affects unauthenticated callers (e.g. a browser hitting the graph UI).
+NEXUS_REQUIRE_READ_AUTH = _bool("NEXUS_REQUIRE_READ_AUTH", False)
 
 # Manifestation system — dynamic UI projection layer
 MANIFESTATION_AUTO_DISSOLVE_MS   = _int( "MANIFESTATION_AUTO_DISSOLVE_MS",   15000)

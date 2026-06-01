@@ -16,11 +16,18 @@ from typing import Any, Dict, List, Optional
 from config.settings import CONDUCTOR_MODEL, RECAP_PROSE_ENABLED
 from core.base_agent import BaseAgent
 from core.ollama_client import OllamaCallError, OllamaCircuitOpenError, get_client
-from memory.nexus.nexus_memory_bridge import (
-    AgentMemoryClient,
-    NexusUnavailableError,
-    get_memory_client,
-)
+try:
+    from memory.nexus.nexus_memory_bridge import (
+        AgentMemoryClient,
+        NexusUnavailableError,
+        get_memory_client,
+    )
+    _NEXUS_BRIDGE_AVAILABLE = True
+except ImportError:
+    AgentMemoryClient = None  # type: ignore[assignment,misc]
+    NexusUnavailableError = Exception  # type: ignore[assignment,misc]
+    get_memory_client = None  # type: ignore[assignment]
+    _NEXUS_BRIDGE_AVAILABLE = False
 
 logger = structlog.get_logger(__name__).bind(component="recap_agent")
 
@@ -35,10 +42,20 @@ class RecapAgent(BaseAgent):
 
     name = "recap_agent"
 
-    def __init__(self, client: Optional[AgentMemoryClient] = None) -> None:
-        self._client = client or get_memory_client()
+    def __init__(self, client: Optional["AgentMemoryClient"] = None) -> None:
+        if _NEXUS_BRIDGE_AVAILABLE:
+            self._client = client or get_memory_client()
+        else:
+            self._client = None
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if not _NEXUS_BRIDGE_AVAILABLE:
+            return {
+                "status": "error",
+                "error": "Nexus memory bridge not available in this build",
+                "confidence": 0.0,
+            }
+
         task: str = arguments.get("task", "Unknown task")
         task_results: Dict[str, Any] = arguments.get("task_results", {})
         cognitive_analysis: Dict[str, Any] = arguments.get("cognitive_analysis", {})

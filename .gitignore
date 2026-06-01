@@ -16,3 +16,7 @@ memory/*_db/
 # .zim archives, the markdown cache, embeddings, and the metadata sqlite.
 # All of it is regenerable from VIVI_MEMDSK_PATH; nothing here belongs in git.
 memory/zim_kb_data/
+
+# Private personal knowledge vault (medical chat logs, personal notes, etc.).
+# Never commit — contains private single-user data. Files stay on disk locally.
+memory/nexus/vault/

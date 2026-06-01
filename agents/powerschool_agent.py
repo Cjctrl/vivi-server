@@ -85,7 +85,27 @@ class PowerSchoolAgent(BaseAgent):
                 page.click(PS_LOGIN_BUTTON)
                 page.wait_for_load_state("networkidle", timeout=15000)
 
-                # Navigate to grades
+                # Detect login/auth failure before scraping. On bad credentials
+                # PowerSchool re-renders the login form (the password field
+                # persists) rather than redirecting, so a rejected login used to
+                # fall through and return status:"success" with 0 grades —
+                # indistinguishable from an empty gradebook. If we're still on the
+                # login page, fail honestly instead.
+                if page.query_selector(PS_PASSWORD_SELECTOR) is not None:
+                    browser.close()
+                    return {
+                        "status": "error",
+                        "error": (
+                            "PowerSchool login failed — credentials rejected (still on "
+                            "the login page). Verify POWERSCHOOL_USERNAME / "
+                            "POWERSCHOOL_PASSWORD and that the district login selectors "
+                            "still match."
+                        ),
+                        "confidence": 0.0,
+                    }
+
+                # Navigate to grades (some districts show them on the landing page,
+                # so the grades link is optional)
                 grades_link = page.query_selector(PS_GRADES_LINK)
                 if grades_link:
                     grades_link.click()
@@ -104,9 +124,9 @@ class PowerSchoolAgent(BaseAgent):
 
                 browser.close()
 
-        except Exception as exc:
+        except Exception:
             logger.exception("[powerschool_agent] scrape failed")
-            return {"status": "error", "error": str(exc), "confidence": 0.0}
+            return {"status": "error", "error": "powerschool sync failed", "confidence": 0.0}
 
         # Persist to SQLite
         try:

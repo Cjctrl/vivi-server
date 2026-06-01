@@ -17,12 +17,19 @@ Both expose identical methods with the same signatures.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-NEXUS_BASE_URL = "http://127.0.0.1:7200"
+# Host/port are read straight from the environment (config.settings loads .env
+# into os.environ, and every entrypoint imports settings before this module).
+# Kept as a plain os.environ read — not a config.settings import — so importing
+# the bridge never triggers settings' _required() checks at import time.
+NEXUS_HOST = os.environ.get("NEXUS_HOST", "127.0.0.1")
+NEXUS_PORT = os.environ.get("NEXUS_PORT", "7200")
+NEXUS_BASE_URL = f"http://{NEXUS_HOST}:{NEXUS_PORT}"
 
 # ---------------------------------------------------------------------------
 # Thread-local agent context — set by AsyncAgentWrapper before each agent run

@@ -174,11 +174,19 @@ class OllamaClient:
 
 
 _default_client: Optional[OllamaClient] = None
+_default_client_lock = threading.Lock()
 
 
 def get_client() -> OllamaClient:
-    """Return a shared OllamaClient singleton."""
+    """Return a shared OllamaClient singleton.
+
+    Double-checked locking so concurrent agents racing on first use don't each
+    build a client (and tear down the shared circuit-breaker state). Mirrors the
+    guard in vivi-brain's core/ollama_client.py.
+    """
     global _default_client
     if _default_client is None:
-        _default_client = OllamaClient()
+        with _default_client_lock:
+            if _default_client is None:
+                _default_client = OllamaClient()
     return _default_client

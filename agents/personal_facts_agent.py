@@ -21,12 +21,20 @@ from typing import Any, Dict, List, Optional
 from config.settings import CONDUCTOR_MODEL
 from core.base_agent import BaseAgent
 from core.llm_client import LLMClient
-from memory.nexus.nexus_memory_bridge import (
-    AgentMemoryClient,
-    NexusAPIError,
-    NexusUnavailableError,
-    get_memory_client,
-)
+try:
+    from memory.nexus.nexus_memory_bridge import (
+        AgentMemoryClient,
+        NexusAPIError,
+        NexusUnavailableError,
+        get_memory_client,
+    )
+    _NEXUS_BRIDGE_AVAILABLE = True
+except ImportError:
+    AgentMemoryClient = None  # type: ignore[assignment,misc]
+    NexusAPIError = Exception  # type: ignore[assignment,misc]
+    NexusUnavailableError = Exception  # type: ignore[assignment,misc]
+    get_memory_client = None  # type: ignore[assignment]
+    _NEXUS_BRIDGE_AVAILABLE = False
 
 logger = structlog.get_logger(__name__).bind(component="personal_facts_agent")
 
@@ -52,11 +60,21 @@ class PersonalFactsAgent(BaseAgent):
 
     name = "personal_facts"
 
-    def __init__(self, client: Optional[AgentMemoryClient] = None) -> None:
-        self._client = client or get_memory_client()
+    def __init__(self, client: Optional["AgentMemoryClient"] = None) -> None:
+        if _NEXUS_BRIDGE_AVAILABLE:
+            self._client = client or get_memory_client()
+        else:
+            self._client = None
         self._llm = LLMClient()
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if not _NEXUS_BRIDGE_AVAILABLE:
+            return {
+                "status": "error",
+                "error": "Nexus memory bridge not available in this build",
+                "confidence": 0.0,
+            }
+
         action: str = arguments.get("action", "recall_relevant").lower()
 
         if action == "extract_and_store":

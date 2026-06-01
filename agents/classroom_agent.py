@@ -72,10 +72,12 @@ class ClassroomAgent(BaseAgent):
             from google_auth_oauthlib.flow import InstalledAppFlow
             from google.auth.transport.requests import Request
             from googleapiclient.discovery import build
+            import httplib2
+            from google_auth_httplib2 import AuthorizedHttp
         except ImportError:
             raise RuntimeError(
                 "Google API libraries not installed. "
-                "Run: pip install google-auth-oauthlib google-api-python-client"
+                "Run: pip install google-auth-oauthlib google-api-python-client google-auth-httplib2"
             )
 
         creds: Optional[Credentials] = None
@@ -91,7 +93,11 @@ class ClassroomAgent(BaseAgent):
             _TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
             _TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
 
-        return build("classroom", "v1", credentials=creds)
+        # Wrap the credentials in an authorized http with a 15s socket timeout so
+        # a hung Google call cannot block the agent forever. build() forbids
+        # passing both http= and credentials=, so auth is carried by AuthorizedHttp.
+        authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=15))
+        return build("classroom", "v1", http=authed_http)
 
     def _sync(self) -> Dict[str, Any]:
         try:

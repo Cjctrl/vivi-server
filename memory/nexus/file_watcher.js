@@ -57,8 +57,18 @@ const NEXUS_URL = process.env.NEXUS_URL || "http://127.0.0.1:7200";
 const REEMBED_ENDPOINT = `${NEXUS_URL}/api/nodes/reembed`;
 const DEBOUNCE_MS = parseInt(process.env.WATCHER_DEBOUNCE_MS || "500", 10);
 
+// /api/nodes/reembed is a mutating POST; the NEXUS server rejects it with 401
+// unless the shared secret is supplied via X-Nexus-Token. Read it once at startup.
+const NEXUS_SECRET = process.env.NEXUS_SECRET || "";
+
 console.log(`[nexus/watcher] watching: ${KB_PATH}`);
 console.log(`[nexus/watcher] nexus server: ${NEXUS_URL}`);
+if (!NEXUS_SECRET) {
+  console.warn(
+    "[nexus/watcher] WARNING: NEXUS_SECRET is not set — reembed requests will be " +
+      "rejected with 401 by the server. Set NEXUS_SECRET in the environment."
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Debounce map  {filePath → timeoutHandle}
@@ -80,9 +90,13 @@ function scheduleReembed(filePath) {
 async function triggerReembed(filePath) {
   const fetch = await getFetch();
   try {
+    const headers = { "Content-Type": "application/json" };
+    if (NEXUS_SECRET) {
+      headers["X-Nexus-Token"] = NEXUS_SECRET;
+    }
     const resp = await fetch(REEMBED_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ path: filePath }),
     });
 

@@ -1,6 +1,6 @@
 """
 nexus/server.py
-NEXUS HTTP gateway — port 7200.
+NEXUS HTTP gateway — binds NEXUS_HOST:NEXUS_PORT (default 127.0.0.1:7200).
 
 Every agent interaction with the knowledge base goes through these routes.
 No agent may call Qdrant directly; this server is the sole gateway.
@@ -62,7 +62,10 @@ def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> Non
 
 from config.settings import (
     MEMORY_DB_PATH,
+    NEXUS_HOST,
     NEXUS_KB_PATH,
+    NEXUS_PORT,
+    NEXUS_REQUIRE_READ_AUTH,
     NEXUS_SECRET,
     VECTOR_DIMENSION,
 )
@@ -358,21 +361,38 @@ def _extract_token(request: web.Request) -> str:
     return ""
 
 
+def _token_ok(request: web.Request) -> bool:
+    """True when the request carries the valid NEXUS shared secret."""
+    provided = _extract_token(request)
+    # compare_digest is timing-safe; both operands must be non-empty.
+    return bool(provided) and hmac.compare_digest(provided, NEXUS_SECRET)
+
+
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    """Reject mutating requests that don't carry the NEXUS shared secret."""
-    if request.method in _MUTATING_METHODS:
-        provided = _extract_token(request)
-        # compare_digest is timing-safe; both operands must be non-empty.
-        if not provided or not hmac.compare_digest(provided, NEXUS_SECRET):
-            logger.warning(
-                "[nexus/auth] rejected unauthenticated %s %s",
-                request.method, request.path,
-            )
-            return web.json_response(
-                {"error": "Unauthorized — valid Bearer token or X-Nexus-Token header required"},
-                status=401,
-            )
+    """Gate mutating requests behind the NEXUS shared secret.
+
+    Reads stay open by default (localhost-bound). Set NEXUS_REQUIRE_READ_AUTH to
+    also require the token on data reads (GET /api/*); /health and the static UI
+    shell stay open regardless. The agent bridge already sends the token on every
+    request, so enabling read-auth only affects unauthenticated callers such as a
+    browser hitting the graph UI.
+    """
+    is_mutation = request.method in _MUTATING_METHODS
+    is_gated_read = (
+        NEXUS_REQUIRE_READ_AUTH
+        and request.method == "GET"
+        and request.path.startswith("/api/")
+    )
+    if (is_mutation or is_gated_read) and not _token_ok(request):
+        logger.warning(
+            "[nexus/auth] rejected unauthenticated %s %s",
+            request.method, request.path,
+        )
+        return web.json_response(
+            {"error": "Unauthorized — valid Bearer token or X-Nexus-Token header required"},
+            status=401,
+        )
     return await handler(request)
 
 
@@ -381,7 +401,7 @@ async def auth_middleware(request: web.Request, handler):
 # ===========================================================================
 
 async def handle_health(request: web.Request) -> web.Response:
-    return web.json_response({"status": "ok", "service": "nexus", "port": 7200})
+    return web.json_response({"status": "ok", "service": "nexus", "port": NEXUS_PORT})
 
 
 # ── Search ─────────────────────────────────────────────────────────────────
@@ -746,10 +766,13 @@ async def handle_delete_node(request: web.Request) -> web.Response:
 async def handle_get_graph(request: web.Request) -> web.Response:
     """
     GET /api/graph
-    Returns D3-compatible nodes + links with per-node agent interaction data.
+    Returns D3-compatible nodes + links. The per-node agent-interaction map is
+    included only for authenticated callers (it reveals which agents touched
+    which nodes); unauthenticated callers get an empty map.
     """
     graph: KnowledgeGraph = request.app["graph"]
     node_meta: Dict[str, dict] = request.app.get("node_meta", {})
+    expose_agents = _token_ok(request)
 
     # Union of all known titles: files on disk + edge targets (dangling refs)
     all_titles: set = set(node_meta.keys())
@@ -767,7 +790,7 @@ async def handle_get_graph(request: web.Request) -> web.Response:
             "tags": meta["tags"],
             "link_count": len(graph.adjacency.get(title, [])),
             "backlink_count": len(graph.backlinks.get(title, set())),
-            "agents": _interactions.get(title, {}),
+            "agents": _interactions.get(title, {}) if expose_agents else {},
         })
 
     links = []
@@ -890,7 +913,7 @@ def main() -> None:
         format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
     )
     app = create_app()
-    web.run_app(app, host="127.0.0.1", port=7200, print=logger.info)
+    web.run_app(app, host=NEXUS_HOST, port=NEXUS_PORT, print=logger.info)
 
 
 if __name__ == "__main__":
