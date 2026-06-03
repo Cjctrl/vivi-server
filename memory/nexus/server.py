@@ -714,6 +714,12 @@ async def handle_reembed(request: web.Request) -> web.Response:
     if not file_path.is_absolute():
         file_path = kb_root / file_path
 
+    # Containment guard — an absolute caller-supplied path is read directly, so
+    # confine it to kb_root the same way _title_to_path() does for every other
+    # handler. resolve() collapses ".." and symlinks before the check.
+    if not file_path.resolve().is_relative_to(kb_root.resolve()):
+        return web.json_response({"error": "path outside KB root"}, status=403)
+
     if not file_path.exists():
         return web.json_response({"error": f"File not found: {file_path}"}, status=404)
 
