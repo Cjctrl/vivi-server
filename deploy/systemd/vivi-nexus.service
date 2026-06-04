@@ -1,0 +1,28 @@
+[Unit]
+Description=V.I.V.I NEXUS memory server (:7200)
+After=network-online.target ollama.service vivi-qdrant.service
+Wants=network-online.target ollama.service
+Requires=vivi-qdrant.service
+
+[Service]
+User=vivi
+Group=vivi
+WorkingDirectory=/opt/vivi/vivi-server
+EnvironmentFile=/etc/vivi/vivi.env
+ExecStart=/opt/vivi/venv/bin/python -m memory.nexus.server
+Restart=always
+RestartSec=3
+
+# --- hardening (headless service, no desktop, dedicated user) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# All runtime state lives here; /opt code stays read-only under ProtectSystem=strict.
+ReadWritePaths=/var/lib/vivi
+
+[Install]
+WantedBy=multi-user.target

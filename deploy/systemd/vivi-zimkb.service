@@ -1,0 +1,25 @@
+[Unit]
+Description=V.I.V.I zim_kb startup / health (offline knowledge base)
+After=vivi-nexus.service
+Wants=vivi-nexus.service
+
+[Service]
+# startup.py is an idempotent boot/health pass (index + report), so it runs once
+# and stays "active (exited)". If your startup module becomes long-running, change
+# Type to simple and add Restart=always.
+Type=oneshot
+RemainAfterExit=yes
+User=vivi
+Group=vivi
+WorkingDirectory=/opt/vivi/vivi-server
+EnvironmentFile=/etc/vivi/vivi.env
+ExecStart=/opt/vivi/venv/bin/python -m memory.zim_kb.startup
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/vivi
+
+[Install]
+WantedBy=multi-user.target

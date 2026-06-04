@@ -1,0 +1,15 @@
+[Unit]
+Description=V.I.V.I nightly backup (restic)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vivi
+Group=vivi
+# RESTIC_REPOSITORY + RESTIC_PASSWORD_FILE (or RESTIC_PASSWORD) live here:
+EnvironmentFile=/etc/vivi/backup.env
+ExecStart=/opt/vivi/vivi-server/deploy/backup.sh
+# Don't hammer a failed remote — let the timer retry next day.
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,26 @@
+[Unit]
+Description=V.I.V.I mobile gateway (:7400, Tailscale)
+After=vivi-nexus.service ollama.service vivi-qdrant.service tailscaled.service
+Requires=vivi-nexus.service
+Wants=ollama.service tailscaled.service
+
+[Service]
+User=vivi
+Group=vivi
+# The gateway is a vivi-BRAIN component; it imports the conductor + agent stack.
+# It connects to NEXUS over HTTP (NEXUS_HOST/PORT) and to Ollama on :11434.
+WorkingDirectory=/opt/vivi/vivi-brain
+EnvironmentFile=/etc/vivi/vivi.env
+ExecStartPre=/bin/sh -c 'until curl -sf http://127.0.0.1:7200/health >/dev/null; do sleep 1; done'
+ExecStart=/opt/vivi/venv/bin/python -m orchestration.mobile_gateway
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/vivi
+
+[Install]
+WantedBy=multi-user.target

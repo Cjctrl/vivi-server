@@ -1,0 +1,8 @@
+# Deploy artifacts run on Linux — force LF so CRLF from a Windows checkout
+# never breaks a shell shebang or a systemd unit.
+*.sh        text eol=lf
+*.service   text eol=lf
+*.timer     text eol=lf
+*.conf      text eol=lf
+*.env*      text eol=lf
+RUNBOOK.md  text eol=lf

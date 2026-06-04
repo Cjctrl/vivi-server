@@ -1,0 +1,22 @@
+[Unit]
+Description=V.I.V.I Qdrant vector store (:6333, loopback)
+Documentation=https://qdrant.tech
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+# Runs as root because the Docker socket requires it. The qdrant process is
+# non-root INSIDE the container. Native-binary alternative (runs as user vivi,
+# no Docker) is documented in deploy/RUNBOOK.md.
+ExecStartPre=-/usr/bin/docker rm -f vivi-qdrant
+ExecStart=/usr/bin/docker run --rm --name vivi-qdrant \
+  -p 127.0.0.1:6333:6333 \
+  -v /var/lib/vivi/qdrant:/qdrant/storage \
+  qdrant/qdrant:latest
+ExecStop=/usr/bin/docker stop vivi-qdrant
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
