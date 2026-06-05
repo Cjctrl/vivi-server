@@ -12,20 +12,29 @@ from typing import Any, Dict, List, Optional
 
 from core.base_agent import BaseAgent
 
+try:
+    from config import settings as _settings
+except Exception:  # settings should always import, but never hard-fail the agent
+    _settings = None
+
 logger = structlog.get_logger(__name__).bind(component="calendar_agent")
 
-_CREDENTIALS_PATH = Path("config/credentials.json")
-# JSON (google-auth authorized-user format), not pickle: deserializing a pickle
-# token executes arbitrary code if the file is tampered with. A stale .pickle
-# from before this migration is simply ignored — the OAuth flow re-runs once
-# and writes the JSON token.
-_TOKEN_PATH = Path("config/classroom_token.json")
 
+def _cfg(name: str, default: str) -> str:
+    return (getattr(_settings, name, None) or default) if _settings else default
+
+
+# Calendar uses the PERSONAL Google account and its OWN token (Classroom uses a
+# separate token for the school account). Paths resolve from settings (anchored
+# to PROJECT_ROOT) so they're stable regardless of the process's cwd.
+# JSON (google-auth authorized-user format), not pickle.
+_CREDENTIALS_PATH = Path(_cfg("GOOGLE_CREDENTIALS_PATH", "config/credentials.json"))
+_TOKEN_PATH = Path(_cfg("GOOGLE_CALENDAR_TOKEN", "config/google_calendar_token.json"))
+_LOGIN_HINT = _cfg("GOOGLE_CALENDAR_ACCOUNT", "") or None
+
+# Full read/WRITE so the agent can also create events.
 SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/classroom.courses.readonly",
-    "https://www.googleapis.com/auth/classroom.coursework.me.readonly",
-    "https://www.googleapis.com/auth/classroom.student-submissions.me.readonly",
+    "https://www.googleapis.com/auth/calendar",
 ]
 
 _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
@@ -63,10 +72,12 @@ class CalendarAgent(BaseAgent):
             return self._sync()
         elif action == "query":
             return self._query(str(arguments.get("filter", "upcoming")))
+        elif action == "create":
+            return self._create(arguments)
         else:
             return {
                 "status": "error",
-                "error": f"Unknown action '{action}'. Use: sync, query.",
+                "error": f"Unknown action '{action}'. Use: sync, query, create.",
                 "confidence": 0.0,
             }
 
@@ -95,7 +106,10 @@ class CalendarAgent(BaseAgent):
                 creds.refresh(Request())
             else:
                 flow = InstalledAppFlow.from_client_secrets_file(str(_CREDENTIALS_PATH), SCOPES)
-                creds = flow.run_local_server(port=0)
+                kwargs = {"port": 0, "access_type": "offline", "prompt": "consent"}
+                if _LOGIN_HINT:
+                    kwargs["login_hint"] = _LOGIN_HINT
+                creds = flow.run_local_server(**kwargs)
             _TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
             _TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
 
@@ -190,6 +204,61 @@ class CalendarAgent(BaseAgent):
         except Exception:
             logger.exception("[calendar_agent] sync failed")
             return {"status": "error", "error": "calendar sync failed", "confidence": 0.0}
+
+    def _create(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a Google Calendar event on the primary calendar (WRITE)."""
+        try:
+            service = self._get_service()
+        except Exception:
+            logger.exception("[calendar_agent] failed to build Google service")
+            return {"status": "error", "error": "calendar authentication failed", "confidence": 0.0}
+
+        summary = str(arguments.get("summary") or arguments.get("title") or "").strip()
+        if not summary:
+            return {"status": "error", "error": "event needs a title", "confidence": 0.0}
+
+        all_day = bool(arguments.get("all_day"))
+        start = arguments.get("start")
+        end = arguments.get("end")
+        body: Dict[str, Any] = {"summary": summary}
+        if arguments.get("description"):
+            body["description"] = str(arguments["description"])
+        if arguments.get("location"):
+            body["location"] = str(arguments["location"])
+
+        try:
+            if all_day:
+                # start/end are YYYY-MM-DD; Google treats end.date as exclusive.
+                from datetime import date as _date, timedelta as _td
+                if not start:
+                    start = str(_date.today())
+                if not end:
+                    end = str(_date.fromisoformat(str(start)) + _td(days=1))
+                body["start"] = {"date": str(start)}
+                body["end"] = {"date": str(end)}
+            else:
+                if not start or not end:
+                    return {"status": "error",
+                            "error": "a timed event needs start and end (RFC3339 dateTime)",
+                            "confidence": 0.0}
+                tz = str(arguments.get("timezone") or "")
+                body["start"] = {"dateTime": str(start)}
+                body["end"] = {"dateTime": str(end)}
+                if tz:
+                    body["start"]["timeZone"] = tz
+                    body["end"]["timeZone"] = tz
+            created = service.events().insert(calendarId="primary", body=body).execute()
+            return {
+                "status": "success",
+                "event_id": created.get("id"),
+                "html_link": created.get("htmlLink"),
+                "summary": summary,
+                "confidence": 1.0,
+                "error": None,
+            }
+        except Exception:
+            logger.exception("[calendar_agent] create failed")
+            return {"status": "error", "error": "could not create event", "confidence": 0.0}
 
     def _query(self, filter_: str) -> Dict[str, Any]:
         try:

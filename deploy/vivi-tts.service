@@ -1,0 +1,48 @@
+[Unit]
+Description=V.I.V.I distributed TTS server — IndexTTS2 (:7600)
+# Needs the GPU + (optionally) Tailscale once the brain reaches it remotely.
+# It does NOT depend on NEXUS/Qdrant: TTS is a standalone GPU microservice that
+# only shares the card with them. ollama.service is listed under After so the
+# resident model tier is settling before TTS grabs its ~4.5GB (avoids a startup
+# VRAM race), but it is not Required.
+After=network-online.target ollama.service tailscaled.service
+Wants=network-online.target ollama.service tailscaled.service
+
+[Service]
+User=vivi
+Group=vivi
+# IndexTTS2 is installed from its own checkout (uv-managed venv inside it), so
+# run from there and use THAT interpreter — not the shared /opt/vivi/venv, which
+# does not (and should not) carry the heavy torch/indextts stack.
+#   git clone https://github.com/index-tts/index-tts.git /opt/vivi/index-tts
+# The tts/ package lives in vivi-server, so put it on PYTHONPATH alongside the
+# IndexTTS2 checkout's own importable root.
+WorkingDirectory=/opt/vivi/index-tts
+Environment=PYTHONPATH=/opt/vivi/vivi-server:/opt/vivi/index-tts
+EnvironmentFile=/etc/vivi/vivi.env
+# uv sync creates .venv inside the checkout; point ExecStart at that interpreter.
+ExecStart=/opt/vivi/index-tts/.venv/bin/python -m tts.server
+Restart=always
+RestartSec=5
+# IndexTTS2 cold-loads weights on the first request, not at boot, so startup is
+# fast; give synth requests room though (long narration chunks).
+TimeoutStartSec=60
+
+# --- hardening (headless GPU service, dedicated user) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Needs the NVIDIA device nodes for CUDA; ProtectSystem=strict otherwise leaves
+# /opt read-only. Writable scratch (HF cache, temp WAVs) lives under /var/lib/vivi.
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia-uvm rw
+DeviceAllow=/dev/nvidia-uvm-tools rw
+ReadWritePaths=/var/lib/vivi
+
+[Install]
+WantedBy=multi-user.target

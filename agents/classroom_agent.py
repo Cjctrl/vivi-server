@@ -12,14 +12,24 @@ from typing import Any, Dict, List, Optional
 
 from core.base_agent import BaseAgent
 
+try:
+    from config import settings as _settings
+except Exception:
+    _settings = None
+
 logger = structlog.get_logger(__name__).bind(component="classroom_agent")
 
-_CREDENTIALS_PATH = Path("config/credentials.json")
-# JSON (google-auth authorized-user format), not pickle: deserializing a pickle
-# token executes arbitrary code if the file is tampered with. Shared with
-# calendar_agent. A stale .pickle from before this migration is ignored — the
-# OAuth flow re-runs once and writes the JSON token.
-_TOKEN_PATH = Path("config/classroom_token.json")
+
+def _cfg(name: str, default: str) -> str:
+    return (getattr(_settings, name, None) or default) if _settings else default
+
+
+# Classroom uses the SCHOOL Google account + its own token (calendar_agent uses a
+# separate personal-account token). Paths resolve from settings (PROJECT_ROOT).
+# JSON (google-auth authorized-user format), not pickle.
+_CREDENTIALS_PATH = Path(_cfg("GOOGLE_CREDENTIALS_PATH", "config/credentials.json"))
+_TOKEN_PATH = Path(_cfg("GOOGLE_CLASSROOM_TOKEN", "config/classroom_token.json"))
+_LOGIN_HINT = _cfg("GOOGLE_CLASSROOM_ACCOUNT", "") or None
 
 SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
@@ -89,7 +99,10 @@ class ClassroomAgent(BaseAgent):
                 creds.refresh(Request())
             else:
                 flow = InstalledAppFlow.from_client_secrets_file(str(_CREDENTIALS_PATH), SCOPES)
-                creds = flow.run_local_server(port=0)
+                kwargs = {"port": 0, "access_type": "offline", "prompt": "consent"}
+                if _LOGIN_HINT:
+                    kwargs["login_hint"] = _LOGIN_HINT
+                creds = flow.run_local_server(**kwargs)
             _TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
             _TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
 

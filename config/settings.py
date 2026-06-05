@@ -55,17 +55,33 @@ def _bool(key: str, default: bool) -> bool:
 # There is NO VRAM scheduler here (agents call Ollama directly), so pin both
 # resident via Ollama env: OLLAMA_KEEP_ALIVE=-1, OLLAMA_MAX_LOADED_MODELS=2,
 # OLLAMA_NUM_PARALLEL=1 (see the systemd override notes).
+#
+# SCENARIO C — IndexTTS2 coexistence (the reason the summarizer dropped to 8B):
+# this box now also runs the distributed TTS microservice (see the TTS section
+# and tts/), keeping IndexTTS2 warm in VRAM (~4-4.5GB FP16) so the brain can
+# fetch spoken audio over HTTP with no cold-load stall. That single resident
+# model eats the headroom the old 14B summarizer relied on, so we trade summary
+# depth for it. Coexistence budget (Scenario C):
+#       nomic-embed       ~0.6GB   (unchanged — every vector op needs it)
+#       IndexTTS2 (FP16)  ~4.5GB   (warm, single-stream — see tts/engine.py)
+#       qwen3:8b-q4       ~4.0GB   (summarizer, DOWN from qwen3:14b-q4 ~9GB)
+#       CUDA/context      ~0.7GB
+#       ------------------------------------------------------------
+#       total            ~9.8GB used  →  ~2.2GB free on a 12GB 3060.
+# (If you ran TTS on a SEPARATE box you could put 14B back here — but the whole
+# point of Scenario C is keeping memory + TTS on this one card.)
 # =============================================================================
 
 # --- Live models -------------------------------------------------------------
-# Headless 12GB is fully free, so we run the larger 14B summarizer for best
-# extraction quality: qwen3:14b-q4 (~9GB) + nomic-embed (~0.6GB) + 8k q8 KV
-# (~0.7GB) ~= 11.1GB, fits with ~0.9GB margin. To trade depth for headroom and
-# faster summaries instead, set CONDUCTOR_MODEL=qwen3:8b-q4 (frees ~4GB).
-# NOTE: "-q4" is your local tag convention — create qwen3:14b-q4 the same way
-# you made qwen3:8b-q4 (e.g. `ollama pull qwen3:14b` then copy/tag), or point
-# CONDUCTOR_MODEL at whatever 14B tag you have pulled.
-CONDUCTOR_MODEL     = _env("CONDUCTOR_MODEL",     "qwen3:14b-q4")
+# CONDUCTOR_MODEL is qwen3:8b-q4 (~4GB) — the Scenario-C tradeoff. IndexTTS2 has
+# to stay resident next to NEXUS on this 12GB card, and the old 14B summarizer
+# (~9GB) left nowhere near enough room for it. The 8B also summarizes faster,
+# which is the secondary win. Raise back to a 14B tag ONLY if you stop running
+# IndexTTS2 here (TTS_ENABLED=false) or move it to another GPU.
+# NOTE: "-q4" is your local tag convention — create qwen3:8b-q4 the same way you
+# tag the others (e.g. `ollama pull qwen3:8b` then copy/tag), or point
+# CONDUCTOR_MODEL at whatever 8B tag you have pulled.
+CONDUCTOR_MODEL     = _env("CONDUCTOR_MODEL",     "qwen3:8b-q4")
 EMBED_MODEL         = _env("EMBED_MODEL",         "nomic-embed-text")   # also KB_SEARCH_MODEL
 KB_SEARCH_MODEL     = EMBED_MODEL                                        # alias — single source of truth
 VAULT_SEARCH_MODEL  = _env("VAULT_SEARCH_MODEL",  EMBED_MODEL)           # embeddings-backed vault search
@@ -90,9 +106,20 @@ HEAVY_REASONING_MODEL=_env("HEAVY_REASONING_MODEL", CONDUCTOR_MODEL)        # wa
 # =============================================================================
 # VRAM MANAGEMENT  (RTX 3060 12GB)
 # vivi-server has NO VRAM scheduler — it calls Ollama directly, so these values
-# are advisory only. Real residency is governed by Ollama env (OLLAMA_KEEP_ALIVE,
-# OLLAMA_MAX_LOADED_MODELS, OLLAMA_NUM_PARALLEL). Sized for a 12GB card that is
-# fully free under headless Ubuntu (no display compositor).
+# are advisory only. Real residency is governed by Ollama env, which you set in
+# the systemd override (deploy/systemd/ollama.service.d/override.conf):
+#   - OLLAMA_KEEP_ALIVE=-1        keep loaded models resident forever (no 5-min
+#                                 evict) so the conductor/embed pair never cold-
+#                                 loads mid-request.
+#   - OLLAMA_MAX_LOADED_MODELS=2  exactly CONDUCTOR_MODEL + EMBED_MODEL stay
+#                                 resident; cap it so Ollama can't pull a 3rd
+#                                 model onto the card and collide with the warm
+#                                 IndexTTS2 process (Scenario C).
+#   - OLLAMA_NUM_PARALLEL=1       one request slot per model — extra slots clone
+#                                 the KV cache and silently inflate VRAM, which
+#                                 we can't spare next to TTS.
+# Sized for a 12GB card under headless Ubuntu (no display compositor), now
+# SHARING that card with IndexTTS2 — see the Scenario-C budget in MODELS above.
 # =============================================================================
 
 MAX_VRAM_USAGE_GB       = _float("MAX_VRAM_USAGE_GB",   11.0)
@@ -100,8 +127,9 @@ VRAM_HEADROOM_GB        = _float("VRAM_HEADROOM_GB",     1.0)
 MODEL_LOAD_TIMEOUT      = _int(  "MODEL_LOAD_TIMEOUT",   45)   # 3060 cold-loads slower than a 5080
 MODEL_UNLOAD_TIMEOUT    = _int(  "MODEL_UNLOAD_TIMEOUT", 10)
 
-# Context windows — 8k is safe alongside a resident 14B + embeddings at q8 KV.
-# Raise CTX_14B toward 12288 if you keep CONDUCTOR_MODEL at 8B (more spare VRAM).
+# Context windows — 8k is safe alongside the resident 8B summarizer + embeddings
+# at q8 KV, with IndexTTS2 also warm. Pushing CTX higher eats KV-cache VRAM that
+# Scenario C hands to TTS, so leave these at 8k unless you free the card.
 CONTEXT_LIMITS: dict[str, int] = {
     "7b_models":  _int("CTX_7B",  8192),
     "14b_models": _int("CTX_14B", 8192),
@@ -284,6 +312,51 @@ NEXUS_SECRET = _required("NEXUS_SECRET")
 # agent bridge already sends the token on every request, so enabling this only
 # affects unauthenticated callers (e.g. a browser hitting the graph UI).
 NEXUS_REQUIRE_READ_AUTH = _bool("NEXUS_REQUIRE_READ_AUTH", False)
+
+
+# =============================================================================
+# DISTRIBUTED TTS  (IndexTTS2 microservice — tts/, port 7600)
+# This box also serves text-to-speech: IndexTTS2 (GPU, autoregressive, zero-shot,
+# emotion-controllable) runs warm here and the brain (vivi-brain, a separate box)
+# CALLS it over HTTP, gets raw WAV bytes back, and streams them to clients itself
+# ("brain-orchestrated"). This host is HEADLESS — no speakers — so the service
+# only ever RETURNS audio; it never plays anything locally. Keeping IndexTTS2
+# resident is the reason CONDUCTOR_MODEL dropped to 8B (see Scenario C, MODELS).
+# Contract (implemented in tts/server.py):
+#   POST /tts    Bearer {TTS_SECRET}; JSON {text, emo_vector?, voice_id?, format}
+#                -> 200 audio/wav bytes | 4xx/5xx application/json {"error": ...}
+#   GET  /health -> {"status":"ok","model_loaded":bool,"voices":[...]}
+# =============================================================================
+
+# TTS_ENABLED — master switch. Default False so importing settings / running the
+# memory stack on a box WITHOUT the GPU model present is harmless; the TTS server
+# only matters where you actually deploy IndexTTS2. (engine.py still lazy-imports
+# torch/indextts regardless, so this flag is about intent/wiring, not import
+# safety.)
+TTS_ENABLED   = _bool("TTS_ENABLED", False)
+
+# Bind address for the aiohttp TTS server. Defaults to NEXUS_HOST (loopback) so
+# it is not exposed by accident; set TTS_HOST to this box's Tailscale IP when the
+# brain reaches it from another machine (mirror TAILSCALE_BIND_IP).
+TTS_HOST      = _env("TTS_HOST", NEXUS_HOST)
+TTS_PORT      = _int("TTS_PORT", 7600)
+
+# TTS_SECRET — Bearer token gating POST /tts (timing-safe compare in server.py).
+# Falls back to NEXUS_SECRET when unset so a single deployment secret can cover
+# both the memory and TTS surfaces; override it to isolate them. Never hardcode —
+# it resolves from the environment (or, via the fallback, the required
+# NEXUS_SECRET), so there is no usable default and no secret in the repo.
+TTS_SECRET    = _env("TTS_SECRET", NEXUS_SECRET)
+
+# TTS_DEVICE — torch device string handed to IndexTTS2. "cuda:0" is the only
+# realistic value on the 3060 box; exposed for multi-GPU hosts / "cpu" debugging.
+TTS_DEVICE    = _env("TTS_DEVICE", "cuda:0")
+
+# VIVI_VOICE_REF — reference voice clip IndexTTS2 clones for zero-shot synthesis
+# (a 5-15s clean WAV). Relative paths resolve against the repo root. If the file
+# is missing the engine raises a clear error on first synth (it does NOT crash at
+# import) — see tts/engine.py.
+VIVI_VOICE_REF = _env("VIVI_VOICE_REF", str(PROJECT_ROOT / "reference_audio" / "vivi_voice.wav"))
 
 # Manifestation system — dynamic UI projection layer
 MANIFESTATION_AUTO_DISSOLVE_MS   = _int( "MANIFESTATION_AUTO_DISSOLVE_MS",   15000)
