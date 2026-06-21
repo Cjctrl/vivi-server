@@ -138,8 +138,21 @@ class OllamaClient:
                 messages=messages,
                 options={"temperature": options.pop("temperature", 0.3), **options},
             )
-            if isinstance(response, dict) and "message" in response:
-                return str(response["message"]["content"]).strip()
+            # ollama>=0.4 returns a ChatResponse object; older releases returned a
+            # plain dict. Handle both: pull message.content off whichever shape.
+            message = (
+                response.get("message")
+                if isinstance(response, dict)
+                else getattr(response, "message", None)
+            )
+            if message is not None:
+                content = (
+                    message.get("content")
+                    if isinstance(message, dict)
+                    else getattr(message, "content", None)
+                )
+                if content is not None:
+                    return str(content).strip()
             return str(response).strip()
 
         return self._call_with_retry(_chat)
@@ -149,9 +162,14 @@ class OllamaClient:
 
         def _embed() -> List[float]:
             response = self._ollama.embeddings(model=model, prompt=text)
+            # ollama>=0.4 returns an EmbeddingsResponse object; older returned a dict.
             if isinstance(response, dict):
-                return list(response.get("embedding", []))
-            raise OllamaCallError("Ollama embeddings returned unexpected response format")
+                embedding = response.get("embedding", [])
+            else:
+                embedding = getattr(response, "embedding", None) or []
+            if not embedding:
+                raise OllamaCallError("Ollama embeddings returned no vector")
+            return list(embedding)
 
         vector = self._call_with_retry(_embed)
         if model == "nomic-embed-text" and len(vector) != 768:
