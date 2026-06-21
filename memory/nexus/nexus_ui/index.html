@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEXUS · knowledge graph</title>
+<style>
+  :root { --bg:#0b0e14; --panel:#11161f; --line:#1e2733; --text:#dbe4f0; --muted:#7c8aa0; --accent:#37b6c4; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; overflow:hidden; }
+  #app { display:flex; flex-direction:column; height:100vh; }
+  header { display:flex; align-items:center; gap:14px; padding:10px 16px;
+    border-bottom:1px solid var(--line); background:var(--panel); z-index:2; }
+  .brand { font-size:16px; font-weight:600; letter-spacing:3px; }
+  .brand span { color:var(--accent); }
+  input[type=search] { background:var(--bg); border:1px solid var(--line); color:var(--text);
+    border-radius:8px; padding:7px 11px; width:240px; outline:none; }
+  input[type=search]:focus { border-color:var(--accent); }
+  .stats { color:var(--muted); font-size:13px; margin-left:auto; }
+  main { flex:1; position:relative; }
+  svg { width:100%; height:100%; display:block; }
+  .link { stroke:#2a3647; stroke-width:1; }
+  .node circle { stroke:#0b0e14; stroke-width:1.5; cursor:pointer; }
+  .node text { fill:var(--text); font-size:11px; pointer-events:none; paint-order:stroke;
+    stroke:#0b0e14; stroke-width:3px; stroke-linejoin:round; }
+  .node.dim { opacity:.12; }
+  #panel { position:absolute; top:0; right:0; width:330px; height:100%; background:var(--panel);
+    border-left:1px solid var(--line); padding:18px; overflow-y:auto; transform:translateX(100%);
+    transition:transform .2s ease; }
+  #panel.open { transform:none; }
+  #panel h2 { margin:0 26px 8px 0; font-size:17px; font-weight:500; word-break:break-word; }
+  .tag { display:inline-block; background:var(--bg); border:1px solid var(--line); color:var(--muted);
+    border-radius:20px; padding:2px 9px; font-size:12px; margin:2px 4px 2px 0; }
+  .meta { color:var(--muted); font-size:13px; margin:10px 0; }
+  pre { white-space:pre-wrap; word-wrap:break-word; background:var(--bg); border:1px solid var(--line);
+    border-radius:8px; padding:12px; font-size:13px; line-height:1.55; color:#c4d0e0; margin:0; }
+  .close { position:absolute; top:12px; right:14px; cursor:pointer; color:var(--muted);
+    border:none; background:none; font-size:18px; }
+  .overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:14px; text-align:center; color:var(--muted); padding:20px; }
+  .overlay h1 { color:var(--text); font-weight:500; margin:0; font-size:22px; }
+  .overlay input { background:var(--bg); border:1px solid var(--line); color:var(--text);
+    border-radius:8px; padding:9px 11px; width:320px; max-width:80vw; }
+  button.primary { background:var(--accent); color:#04181b; border:none; border-radius:8px;
+    padding:9px 18px; font-weight:600; cursor:pointer; }
+  #empty, #tokwrap { display:none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">N<span>E</span>XUS</div>
+    <input id="search" type="search" placeholder="Search nodes…" autocomplete="off">
+    <div class="stats" id="stats">loading…</div>
+  </header>
+  <main>
+    <svg id="graph"></svg>
+    <div id="empty" class="overlay">
+      <h1>NEXUS is empty</h1>
+      <div>No memories stored yet — VIVI will populate this graph as it learns.</div>
+    </div>
+    <div id="tokwrap" class="overlay">
+      <h1>Authentication</h1>
+      <div>Enter the NEXUS token to load the graph.</div>
+      <input id="tokin" type="password" placeholder="NEXUS token" onkeydown="if(event.key==='Enter')setTok()">
+      <button class="primary" onclick="setTok()">Connect</button>
+    </div>
+    <aside id="panel">
+      <button class="close" onclick="closePanel()" aria-label="Close">✕</button>
+      <h2 id="p-title"></h2>
+      <div id="p-tags"></div>
+      <div class="meta" id="p-meta"></div>
+      <pre id="p-body"></pre>
+    </aside>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script>
+const TYPE_COLORS = { note:'#37b6c4', person:'#e0a458', project:'#9b8cf0',
+  concept:'#5dca8a', task:'#e2685f', session:'#c46fb5' };
+let token = '';
+
+function loadToken(){
+  const h = location.hash.replace(/^#/, '');
+  if (h) {
+    token = decodeURIComponent(h);
+    localStorage.setItem('nexus_token', token);
+    history.replaceState(null, '', location.pathname);
+  } else {
+    token = localStorage.getItem('nexus_token') || '';
+  }
+}
+function setTok(){
+  const v = document.getElementById('tokin').value.trim();
+  if (!v) return;
+  token = v; localStorage.setItem('nexus_token', token);
+  document.getElementById('tokwrap').style.display = 'none';
+  boot();
+}
+function api(path){
+  return fetch(path, { headers: token ? { 'X-Nexus-Token': token } : {} }).then(r => {
+    if (r.status === 401) { document.getElementById('tokwrap').style.display = 'flex'; throw new Error('unauthorized'); }
+    return r.json();
+  });
+}
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;' }[c])); }
+function radius(d){ return 6 + Math.min(14, (d.link_count || 0) + (d.backlink_count || 0)); }
+
+async function boot(){
+  let data;
+  try { data = await api('/api/graph'); } catch (e) { return; }
+  render(data);
+}
+
+function render(data){
+  const nodes = data.nodes || [];
+  const ids = new Set(nodes.map(n => n.id));
+  const links = (data.links || []).filter(l => ids.has(l.source) && ids.has(l.target));
+  document.getElementById('stats').textContent = nodes.length + ' nodes · ' + links.length + ' links';
+  if (nodes.length === 0) { document.getElementById('empty').style.display = 'flex'; return; }
+  document.getElementById('empty').style.display = 'none';
+
+  const svg = d3.select('#graph');
+  svg.selectAll('*').remove();
+  const w = svg.node().clientWidth, h = svg.node().clientHeight;
+  const g = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([0.2, 4]).on('zoom', e => g.attr('transform', e.transform)));
+
+  const sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(75))
+    .force('charge', d3.forceManyBody().strength(-200))
+    .force('center', d3.forceCenter(w / 2, h / 2))
+    .force('collide', d3.forceCollide(d => radius(d) + 8));
+
+  const link = g.append('g').selectAll('line').data(links).join('line').attr('class', 'link');
+  const node = g.append('g').selectAll('g').data(nodes).join('g').attr('class', 'node')
+    .call(d3.drag().on('start', dragStart).on('drag', dragMove).on('end', dragEnd))
+    .on('click', (e, d) => openNode(d));
+  node.append('circle').attr('r', radius).attr('fill', d => TYPE_COLORS[d.type] || '#6b7a90');
+  node.append('text').attr('x', d => radius(d) + 4).attr('y', 4)
+    .text(d => d.title.length > 28 ? d.title.slice(0, 28) + '…' : d.title);
+
+  sim.on('tick', () => {
+    link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    node.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
+  });
+  function dragStart(e, d){ if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; }
+  function dragMove(e, d){ d.fx = e.x; d.fy = e.y; }
+  function dragEnd(e, d){ if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }
+
+  document.getElementById('search').oninput = function(){
+    const q = this.value.toLowerCase().trim();
+    node.classed('dim', d => q && !d.title.toLowerCase().includes(q));
+    link.style('opacity', q ? 0.08 : 1);
+  };
+}
+
+async function openNode(d){
+  const p = document.getElementById('panel');
+  document.getElementById('p-title').textContent = d.title;
+  document.getElementById('p-tags').innerHTML = (d.tags || []).map(t => '<span class="tag">' + esc(t) + '</span>').join('');
+  document.getElementById('p-meta').textContent = (d.type || 'note') + ' · ' + (d.link_count || 0) + ' links · ' + (d.backlink_count || 0) + ' backlinks';
+  document.getElementById('p-body').textContent = 'loading…';
+  p.classList.add('open');
+  try {
+    const full = await api('/api/nodes/' + encodeURIComponent(d.id));
+    document.getElementById('p-body').textContent = full.body || full.content || full.text || JSON.stringify(full, null, 2);
+  } catch (e) {
+    document.getElementById('p-body').textContent = '(could not load content)';
+  }
+}
+function closePanel(){ document.getElementById('panel').classList.remove('open'); }
+
+loadToken();
+if (!token) { document.getElementById('tokwrap').style.display = 'flex'; } else { boot(); }
+window.addEventListener('resize', () => { if (token) boot(); });
+</script>
+</body>
+</html>
