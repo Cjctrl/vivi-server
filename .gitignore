@@ -26,3 +26,6 @@ memory/nexus/vault/
 config/credentials.json
 config/*token*.json
 config/*_token.json
+
+# cloned TTS reference voice — local artifact
+/reference_audio/

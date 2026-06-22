@@ -17,6 +17,7 @@ HTTP contract:
         Headers: Authorization: Bearer {TTS_SECRET}; Content-Type: application/json
         Body:    {"text": str,
                   "emo_vector": [8 floats] | null,
+                  "emo_alpha": float 0..1 | null,   # optional per-request override
                   "voice_id": str (default "vivi"),
                   "format": "wav"}
         200  ->  Content-Type: audio/wav, body = raw WAV bytes
@@ -40,7 +41,10 @@ from aiohttp import web
 from core.logging_setup import configure_logging, get_logger
 from config.settings import (
     TTS_DEVICE,
+    TTS_EMO_ALPHA,
     TTS_HOST,
+    TTS_INTERVAL_SILENCE_MS,
+    TTS_MAX_TOKENS_PER_SEGMENT,
     TTS_PORT,
     TTS_SECRET,
     VIVI_VOICE_REF,
@@ -168,12 +172,27 @@ async def handle_tts(request: web.Request) -> web.Response:
     except TTSEngineError as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
+    # emo_alpha is an OPTIONAL per-request override of the configured TTS_EMO_ALPHA
+    # (how strongly the emotion vector colours the voice). Handy for A/B tuning via
+    # the bench; null/omitted => the server's configured default.
+    emo_alpha = data.get("emo_alpha", None)
+    if emo_alpha is not None:
+        if isinstance(emo_alpha, bool) or not isinstance(emo_alpha, (int, float)):
+            return web.json_response(
+                {"error": "emo_alpha must be a number in 0.0..1.0 or null"}, status=400
+            )
+        emo_alpha = float(emo_alpha)
+        if emo_alpha < 0.0 or emo_alpha > 1.0:
+            return web.json_response(
+                {"error": f"emo_alpha {emo_alpha} out of range 0.0..1.0"}, status=400
+            )
+
     loop = asyncio.get_running_loop()
     try:
         # Synthesis is blocking + GPU-bound; run it off the event loop. The
         # engine serialises concurrent synths internally (single-stream model).
         wav_bytes = await loop.run_in_executor(
-            None, engine.synthesize, text, emo_vector
+            None, engine.synthesize, text, emo_vector, emo_alpha
         )
     except TTSEngineError as exc:
         # Reaches here only for server-side failures (missing reference clip,
@@ -203,7 +222,9 @@ def _build_engine() -> ViviTTS:
         device=TTS_DEVICE,
         use_fp16=True,
         use_cuda_kernel=True,
-        max_text_tokens_per_segment=80,
+        max_text_tokens_per_segment=TTS_MAX_TOKENS_PER_SEGMENT,
+        emo_alpha=TTS_EMO_ALPHA,
+        interval_silence_ms=TTS_INTERVAL_SILENCE_MS,
         voice_id="vivi",
     )
 

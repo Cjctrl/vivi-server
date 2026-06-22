@@ -358,6 +358,26 @@ TTS_DEVICE    = _env("TTS_DEVICE", "cuda:0")
 # import) — see tts/engine.py.
 VIVI_VOICE_REF = _env("VIVI_VOICE_REF", str(PROJECT_ROOT / "reference_audio" / "vivi_voice.wav"))
 
+# ── Voice tuning knobs ───────────────────────────────────────────────────────
+# These shape HOW the voice sounds and are safe to change without code edits —
+# tune them by ear with `python -m tts.tune` once the model + reference clip are
+# on the box. They map straight onto IndexTTS2.infer() params.
+#
+# TTS_EMO_ALPHA — how strongly the 8-D emotion vector colours the voice (only
+# applied WITH a vector). 0.0 = the speaker's natural tone, 1.0 = full emotion
+# transfer. 1.0 tends to over-act; ~0.6-0.7 is the documented sweet spot.
+TTS_EMO_ALPHA = _float("TTS_EMO_ALPHA", 0.65)
+#
+# TTS_MAX_TOKENS_PER_SEGMENT — long lines are chunked into segments of at most
+# this many text tokens. Lower = lower peak VRAM (kept low so IndexTTS2 co-resides
+# with the embed model + 8B summarizer) but more segment joins. 60-100 is sane.
+TTS_MAX_TOKENS_PER_SEGMENT = _int("TTS_MAX_TOKENS_PER_SEGMENT", 80)
+#
+# TTS_INTERVAL_SILENCE_MS — silence inserted between chunked segments (ms). Raise
+# if multi-segment lines sound choppy/rushed at the joins. Passed best-effort:
+# dropped automatically if the installed IndexTTS2 infer() does not accept it.
+TTS_INTERVAL_SILENCE_MS = _int("TTS_INTERVAL_SILENCE_MS", 200)
+
 # Manifestation system — dynamic UI projection layer
 MANIFESTATION_AUTO_DISSOLVE_MS   = _int( "MANIFESTATION_AUTO_DISSOLVE_MS",   15000)
 MANIFESTATION_NOTICE_DISSOLVE_MS = _int( "MANIFESTATION_NOTICE_DISSOLVE_MS",  7000)

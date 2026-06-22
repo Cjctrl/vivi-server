@@ -27,6 +27,7 @@ Headers: Authorization: Bearer {TTS_SECRET}
 Body:    {
            "text": "string",
            "emo_vector": [happy, angry, sad, afraid, disgusted, melancholic, surprised, calm] | null,
+           "emo_alpha": 0.65,       // optional, 0..1, overrides TTS_EMO_ALPHA for this call
            "voice_id": "vivi",      // optional, default "vivi"
            "format": "wav"          // optional, only "wav" supported
          }
@@ -181,6 +182,36 @@ To put the 14B summarizer back, run TTS on a **separate** GPU
 | `TTS_SECRET`     | `NEXUS_SECRET` (fallback)                 | Bearer token gating `/tts`. Never hardcoded.                   |
 | `TTS_DEVICE`     | `cuda:0`                                  | torch device handed to IndexTTS2.                              |
 | `VIVI_VOICE_REF` | `<repo>/reference_audio/vivi_voice.wav`   | 5–15s clean ref clip cloned for synthesis.                     |
+| `TTS_EMO_ALPHA`  | `0.65`                                    | Emotion strength: 0 = speaker's natural tone, 1 = full transfer. ~0.6–0.7 sweet spot. |
+| `TTS_MAX_TOKENS_PER_SEGMENT` | `80`                          | Long lines chunked to this many tokens; lower = lower peak VRAM, more joins. |
+| `TTS_INTERVAL_SILENCE_MS` | `200`                            | Silence (ms) between chunked segments; raise if multi-segment lines sound choppy. |
+
+---
+
+## Voice tuning (`python -m tts.tune`)
+
+IndexTTS2 is **zero-shot** — there's no model to fine-tune. What you tune are the
+knobs above, **by ear**, once the model + reference clip are on this box. The one
+that matters most is **`TTS_EMO_ALPHA`**: it now defaults to `0.65` (the documented
+balance) — `1.0` tends to over-act.
+
+The bench renders a sweep of *emotion × `emo_alpha` × sample line* to labeled WAVs
+using the **real engine**, so what you hear is exactly what the service produces:
+
+```bash
+# from the index-tts checkout's venv, with vivi-server on PYTHONPATH:
+python -m tts.tune                          # default small sweep -> tts/tune_out/
+python -m tts.tune --alphas 0.4,0.6,0.8     # sweep emotion strength
+python -m tts.tune --emotions happy,curious,concerned
+python -m tts.tune --text "Good morning, sir." --alphas 0.5,0.7
+python -m tts.tune --list                   # list presets (no GPU/secrets needed)
+```
+
+Each clip is named `NN_<emotion>_a<alpha>_L<line>_<slug>.wav` and indexed in
+`MANIFEST.txt`. Listen, pick what sounds right, and set those values in `.env`
+(`TTS_EMO_ALPHA`, `TTS_INTERVAL_SILENCE_MS`, `TTS_MAX_TOKENS_PER_SEGMENT`). You can
+also A/B a single line live (no restart) by passing `"emo_alpha"` in a `POST /tts`
+body.
 
 ---
 
@@ -196,9 +227,13 @@ The IndexTTS2 Python API can drift between versions. The kwargs used in
   signature if that version rejects it. `use_cuda_kernel=True` requires the
   compiled CUDA kernel to build — if it fails, set it `False`.
 - **Inference** `infer(spk_audio_prompt=, text=, output_path=, emo_vector=,
-  emo_alpha=, max_text_tokens_per_segment=, verbose=)`. The engine passes
-  `emo_vector` + `emo_alpha=1.0` only when an emotion vector is supplied
-  (otherwise neutral). `max_text_tokens_per_segment=80` keeps peak VRAM down.
+  emo_alpha=, interval_silence=, max_text_tokens_per_segment=, verbose=)`. The
+  engine passes `emo_vector` + `emo_alpha` (configurable via `TTS_EMO_ALPHA`,
+  default `0.65`) only when an emotion vector is supplied (otherwise neutral), and
+  `interval_silence` (from `TTS_INTERVAL_SILENCE_MS`) **best-effort**: both are
+  dropped automatically and synthesis retried if the installed `infer()` rejects
+  them (see `_safe_infer`). `max_text_tokens_per_segment` (from
+  `TTS_MAX_TOKENS_PER_SEGMENT`) keeps peak VRAM down.
 
 If a kwarg is rejected, reconcile `tts/engine.py` (`_build_model()` /
 `_infer_to_file()`) with the installed release — the public `synthesize()` /

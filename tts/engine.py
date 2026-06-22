@@ -127,6 +127,8 @@ class ViviTTS:
         use_fp16: bool = True,
         use_cuda_kernel: bool = True,
         max_text_tokens_per_segment: int = 80,
+        emo_alpha: float = 0.65,
+        interval_silence_ms: Optional[int] = None,
         voice_id: str = "vivi",
         model_dir: str | Path = "checkpoints",
         config_path: Optional[str | Path] = None,
@@ -138,6 +140,11 @@ class ViviTTS:
         self.use_fp16 = use_fp16
         self.use_cuda_kernel = use_cuda_kernel
         self.max_text_tokens_per_segment = int(max_text_tokens_per_segment)
+        # Voice-tuning knobs (config TTS_EMO_ALPHA / TTS_INTERVAL_SILENCE_MS).
+        # emo_alpha scales emotion strength (0..1); interval_silence_ms (or None)
+        # is passed best-effort to infer() and dropped if the version rejects it.
+        self.emo_alpha = float(emo_alpha)
+        self.interval_silence_ms = None if interval_silence_ms is None else int(interval_silence_ms)
         self.voice_id = voice_id
         self.model_dir = Path(model_dir)
         # IndexTTS2 ships its config as checkpoints/config.yaml; allow an override.
@@ -261,12 +268,21 @@ class ViviTTS:
 
     # -- synthesis ---------------------------------------------------------
 
-    def _infer_to_file(self, text: str, out_path: Path, emo_vector: Optional[List[float]]) -> None:
+    def _infer_to_file(
+        self,
+        text: str,
+        out_path: Path,
+        emo_vector: Optional[List[float]],
+        emo_alpha: Optional[float] = None,
+    ) -> None:
         """Run one IndexTTS2 inference, writing a WAV to out_path.
 
         Caller holds self._lock. IndexTTS2.infer writes a file; we hand it a
         temp path and read the bytes back (it has no in-memory return), then
         re-wrap to a clean in-memory WAV in synthesize().
+
+        ``emo_alpha`` (per-call) overrides the configured default for tuning; it
+        only takes effect when an ``emo_vector`` is supplied.
         """
         kwargs = dict(
             spk_audio_prompt=str(self.reference_audio),
@@ -275,21 +291,58 @@ class ViviTTS:
             max_text_tokens_per_segment=self.max_text_tokens_per_segment,
             verbose=False,
         )
+        # interval_silence (ms between chunked segments) smooths the joins — more
+        # relevant here because max_text_tokens_per_segment is kept low for VRAM.
+        # Optional/best-effort: dropped automatically if infer() rejects it.
+        if self.interval_silence_ms is not None:
+            kwargs["interval_silence"] = int(self.interval_silence_ms)
         # Only pass an explicit emotion vector when one was supplied; otherwise
         # let IndexTTS2 fall back to its neutral default (deriving emotion from
-        # the speaker prompt). emo_alpha follows the documented API.
+        # the speaker prompt). emo_alpha scales how strongly that vector colours
+        # the voice; the per-call override falls back to the configured default.
         if emo_vector is not None:
             kwargs["emo_vector"] = emo_vector
-            kwargs["emo_alpha"] = 1.0
+            kwargs["emo_alpha"] = float(self.emo_alpha if emo_alpha is None else emo_alpha)
 
+        self._safe_infer(kwargs, optional_keys=("interval_silence", "emo_alpha"))
+
+    def _safe_infer(self, kwargs: dict, optional_keys: Sequence[str]) -> None:
+        """Call IndexTTS2.infer, tolerating optional tuning kwargs a given release
+        may not accept.
+
+        emo_alpha / interval_silence are documented IndexTTS-2 params, but the API
+        drifts between versions. If infer() raises TypeError, we strip the OPTIONAL
+        tuning kwargs and retry once with the core call (text + reference voice +
+        emo_vector) so synthesis degrades to a sane default rather than failing.
+        A second failure is surfaced as a clear, caller-facing error.
+        """
         try:
             self._model.infer(**kwargs)
+            return
         except TypeError as exc:
-            raise TTSEngineError(
-                f"IndexTTS2.infer(...) rejected its arguments ({exc}). The "
-                "IndexTTS2 API has likely changed — reconcile tts/engine.py "
-                "_infer_to_file() with the installed version."
-            ) from exc
+            dropped = [k for k in optional_keys if k in kwargs]
+            if not dropped:
+                raise TTSEngineError(
+                    f"IndexTTS2.infer(...) rejected its arguments ({exc}). The "
+                    "IndexTTS2 API has likely changed — reconcile tts/engine.py "
+                    "_infer_to_file() with the installed version."
+                ) from exc
+            for k in dropped:
+                kwargs.pop(k, None)
+            logger.warning("indextts2_infer_dropped_kwargs", dropped=dropped, reason=str(exc))
+            try:
+                self._model.infer(**kwargs)
+                return
+            except TypeError as exc2:
+                raise TTSEngineError(
+                    f"IndexTTS2.infer(...) rejected its core arguments ({exc2}) even "
+                    "after dropping optional tuning kwargs ({}). Reconcile "
+                    "tts/engine.py _infer_to_file() with the installed version.".format(
+                        ", ".join(dropped)
+                    )
+                ) from exc2
+            except Exception as exc2:  # pragma: no cover - depends on host/model
+                raise TTSEngineError(f"IndexTTS2 synthesis failed: {exc2}") from exc2
         except Exception as exc:  # pragma: no cover - depends on host/model
             raise TTSEngineError(f"IndexTTS2 synthesis failed: {exc}") from exc
 
@@ -310,12 +363,20 @@ class ViviTTS:
             out.writeframes(frames)
         return buf.getvalue()
 
-    def synthesize(self, text: str, emo_vector: Optional[Sequence[float]] = None) -> bytes:
+    def synthesize(
+        self,
+        text: str,
+        emo_vector: Optional[Sequence[float]] = None,
+        emo_alpha: Optional[float] = None,
+    ) -> bytes:
         """Synthesize *text* to WAV bytes (the only public synth entry point).
 
         Validates input, lazily loads the model on first use, runs ONE inference
         under the instance lock, and returns in-memory WAV bytes. Never plays
         audio. Raises TTSEngineError (caller-facing) on any failure.
+
+        ``emo_alpha`` optionally overrides the configured emotion strength for
+        this one call (used by the tuning bench); None uses the configured value.
         """
         if not isinstance(text, str) or not text.strip():
             raise TTSEngineError("text must be a non-empty string")
@@ -332,7 +393,7 @@ class ViviTTS:
         with self._lock:
             with tempfile.TemporaryDirectory(prefix="vivi_tts_") as tmp:
                 out_path = Path(tmp) / "out.wav"
-                self._infer_to_file(text, out_path, emo)
+                self._infer_to_file(text, out_path, emo, emo_alpha)
                 if not out_path.is_file():
                     raise TTSEngineError("synthesis produced no output file")
                 return self._repackage_wav(out_path)
