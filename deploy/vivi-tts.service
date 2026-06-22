@@ -37,12 +37,19 @@ ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 # Needs the NVIDIA device nodes for CUDA; ProtectSystem=strict otherwise leaves
-# /opt read-only. Writable scratch (HF cache, temp WAVs) lives under /var/lib/vivi.
+# /opt read-only. IndexTTS2 lazily downloads extra components (w2v-bert, semantic
+# codec, campplus, bigvgan) into checkpoints/hf_cache and builds WeTextProcessing
+# FSTs under indextts/utils/tagger_cache — both INSIDE the /opt checkout — so the
+# checkout itself must be writable, and chown'd to this user once after install:
+#     sudo chown -R vivi:vivi /opt/vivi/index-tts
+# HF_HOME is parked on writable /var/lib/vivi so transformers' home cache never
+# tries to write under the (read-only) /opt service home.
+Environment=HF_HOME=/var/lib/vivi/hf_home
 DeviceAllow=/dev/nvidia0 rw
 DeviceAllow=/dev/nvidiactl rw
 DeviceAllow=/dev/nvidia-uvm rw
 DeviceAllow=/dev/nvidia-uvm-tools rw
-ReadWritePaths=/var/lib/vivi
+ReadWritePaths=/var/lib/vivi /opt/vivi/index-tts
 
 [Install]
 WantedBy=multi-user.target
